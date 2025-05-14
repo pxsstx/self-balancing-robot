@@ -17,20 +17,25 @@
 MPU6050 mpu6050(Wire);
 IRController ir(4);
 
-double originalSetpoint = 1;
-double input, output, setpoint = originalSetpoint;
-double Kp = 40;
-double Ki = 260;
-double Kd = 1;
-double speedOffset = 0, trunOffset = 0, realOutput;
+// PID for balance 
+double angle_input, motor_output, angle_setpoint = 1.2;
+double Kp_bal = 40, Ki_bal = 320, Kd_bal = 1;
+PID balancePID(&angle_input, &motor_output, &angle_setpoint, Kp_bal, Ki_bal, Kd_bal, DIRECT);
 
-PID pid(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
+// PID for velocity
+double velocity_input = 0, velocity_output = 0, velocity_setpoint = 0;
+double Kp_vel = 5.0, Ki_vel = 0.3, Kd_vel = 0.0;
+PID velocityPID(&velocity_input, &velocity_output, &velocity_setpoint, Kp_vel, Ki_vel, Kd_vel, DIRECT);
 
+
+// motor
+double speedOffset = 0, trunOffset = 0;
 motorcontrol my_motor(ENA, IN1, IN2, ENB, IN3, IN4, 1.0, 1.0);  // SpeedFactorA, SpeedFactorB
 
-unsigned long commandTimeout = 200;  // สำหรับเข็คว่ามี IRcommand ไหมใน 0.2 วิ
+unsigned long last_time = 0;
+unsigned long commandTimeout = 200;
 
-double x_offset = -1.46, y_offset = 0.98, z_offset = -1.44;
+double x_offset = -1.90, y_offset = 0.98, z_offset = -1.44;
 
 void setup() {
   Serial.begin(115200);
@@ -40,9 +45,13 @@ void setup() {
 
   my_motor.begin();
 
-  pid.SetMode(AUTOMATIC);
-  pid.SetSampleTime(10);
-  pid.SetOutputLimits(-255, 255);
+  balancePID.SetMode(AUTOMATIC);
+  balancePID.SetSampleTime(10);
+  balancePID.SetOutputLimits(-255, 255);
+
+  velocityPID.SetMode(AUTOMATIC);
+  velocityPID.SetSampleTime(10);
+  velocityPID.SetOutputLimits(-10, 10); // ปรับเป้าหมายมุมไม่เกิน ±10 องศา
 
   ir.begin();
   Serial.println("Ready!");
@@ -50,60 +59,63 @@ void setup() {
 }
 
 void loop() {
-  // อ่านข้อมูลจากเซนเซอร์
   mpu6050.update();
-  input = mpu6050.getAngleX();
-
-  // คำนวณค่า PID
-  pid.Compute();
-  
   unsigned long now = millis();
-  
+  double gyroX = mpu6050.getGyroX();      // ใช้เป็นตัวแทนความเร็ว
+  double angle = mpu6050.getAngleX();
+
+  // --- Velocity PID ---
+  velocity_input = -gyroX;
+  velocityPID.Compute();
+  angle_setpoint = 1.0 + velocity_output;  // 1.0 คือมุมสมดุลปกติ
+
+  // --- Balance PID ---
+  angle_input = angle;
+  balancePID.Compute();
+
+  // --- ตรวจ IR Command ---
   if (ir.available()) {
-      IRCommand cmd = ir.getCommand();
-      ir.resume();
-      ir.updateLastCommandTime();
+    IRCommand cmd = ir.getCommand();
+    ir.resume();
+    ir.updateLastCommandTime();
 
-      switch (cmd) {
-          case IRCommand::Forward:
-              // เดินหน้า
-              if (setpoint < originalSetpoint + 3)
-                setpoint += 0.5;
-              break;
-
-          case IRCommand::Backward:
-              // ถอยหลัง 
-              if (setpoint > originalSetpoint - 3)
-                setpoint -= 0.5;
-              break;
-
-          case IRCommand::Left:
-              // เลี้ยวซ้าย
-              my_motor.turnLeft(255);
-              break;
-
-          case IRCommand::Right:
-              // เลี้ยวขวา
-              my_motor.turnRight(255);
-              break;
-
-          default:
-              break;
-      }
+    switch (cmd) {
+      case IRCommand::Forward:
+        velocity_setpoint = 20.0;  // เดินหน้า
+        break;
+        
+      case IRCommand::Backward:
+        velocity_setpoint = -20.0; // ถอยหลัง
+        break;
+        
+     case IRCommand::Left:
+        trunOffset = -50; // เลี้ยวซ้าย
+        break;
+        
+      case IRCommand::Right:
+        trunOffset = 50; // เลี้ยวขวา
+        break;
+        
+      default:
+        break;
+    }
   }
-
+  
   // กลับสู่สภาวะ Default ถ้าไม่มีคำสั่ง IR มานานเกินไป
   if (now - ir.getLastCommandTime() > commandTimeout) {
-     setpoint = originalSetpoint;
+    velocity_setpoint = 0;
+    trunOffset = 0;
   }
-  my_motor.move(output, speedOffset, trunOffset, MIN_ABS_SPEED_A, MIN_ABS_SPEED_B);
 
-  // แสดงข้อมูลใน Serial Monitor
-  Serial.print(" | Angle: ");
-  Serial.print(input);
-  Serial.print(" | Output: ");
-  Serial.print(output);
-  Serial.print(" | Setpoint: ");
-  Serial.println(setpoint);
+  // --- ควบคุมมอเตอร์ ---
+  my_motor.move(motor_output, speedOffset, trunOffset, MIN_ABS_SPEED_A, MIN_ABS_SPEED_B);
+
+  // --- Debug Serial ---
+  Serial.print("Angle: "); Serial.print(angle);
+  Serial.print(" | Setpoint: "); Serial.print(angle_setpoint);
+  Serial.print(" | Motor PWM: "); Serial.print(motor_output);
+  Serial.print(" | GyroX: "); Serial.print(gyroX);
+  Serial.print(" | VelOut: "); Serial.println(velocity_output);
+
   delay(10);
 }
